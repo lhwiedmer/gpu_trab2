@@ -1,7 +1,3 @@
-
-
-
-
 __global__ void blockAndGlobalHisto(unsigned int *hh, unsigned int *hg,
     unsigned int h, unsigned int *input, long long int nE, unsigned int min,
     unsigned int max) {
@@ -41,6 +37,32 @@ __global__ void blockAndGlobalHisto(unsigned int *hh, unsigned int *hg,
 }
 
 
-__global__ void scan(unsigned int *hg, unsigned int *shg, unsigned int h){
-
+__global__ void GlobalHistoScan(unsigned int *hg, unsigned int *shg, unsigned int h){
+    extern __shared__ unsigned int XY[];
+    if (threadIdx.x < h) {
+        XY[threadIdx.x] = hg[threadIdx.x];
+    }
+    unsigned int numThreads = (h+1) >> 1;
+    __syncthreads();
+    for (unsigned int stride = 1;stride <= numThreads; stride = stride << 1) {
+        int index = (threadIdx.x+1)*stride*2 - 1;
+        if(index < h)
+            XY[index] += XY[index-stride];
+        __syncthreads();
+    }
+    for (unsigned int stride = (numThreads+1) >> 1; stride > 0; stride = stride >> 1) {
+        __syncthreads();
+        int index = (threadIdx.x+1)*stride*2 - 1;
+        if(index+stride < h)
+            XY[index + stride] += XY[index];
+    }
+    __syncthreads();
+    if (threadIdx.x < h) {
+        if (!threadIdx.x) {
+            shg[threadIdx.x] = 0;
+        } else {
+            shg[threadIdx.x] = XY[threadIdx.x - 1];
+        }
+    }
 }
+

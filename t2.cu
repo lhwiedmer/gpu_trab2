@@ -18,8 +18,9 @@ __global__ void blockAndGlobalHisto(unsigned int *hh, unsigned int *hg,
     while (start < nE) {
         ig = start + threadIdx.x;
         if (ig < nE) {
+            unsigned int aux = input[ig];
             for (int i = 0; i < h; i++) {
-                if (input[ig] < limit[i]) {
+                if (aux < limit[i]) {
                     atomicAdd(histo+i, 1);
                     break;
                 }
@@ -94,5 +95,42 @@ __global__ void verticalScanHH(unsigned int *hh, unsigned int *psv, unsigned int
         } else {
             psv[ig] = XY[threadIdx.x - 1];
         }
+    }
+}
+
+__global__ void partitionKernel(unsigned int *hh, unsigned int *shg, unsigned int *psv,
+                                unsigned int h, unsigned int *input, unsigned int *output,
+                                unsigned long long int nE, unsigned int nMin, unsigned int nMax) {  
+    extern __shared__ unsigned int hlsh[];
+    extern __shared__ unsigned int limit[];
+    __shared__ unsigned int parcial[1024];
+    if (threadIdx.x < h) {
+        hlsh[threadIdx.x] = shg[threadIdx.x];
+        hlsh[threadIdx.x] += psv[threadIdx.x + blockIdx.x * h];
+    }
+    unsigned int tamFaixa = (nMax - nMin + h) / h; //Calcula o teto do numero de possiveis valores sobre o numero de faixas
+    //Calcula o limite superior do intervalo de valores de cada faixa e guarda no vetor limit
+    if (threadIdx.x < h)
+        limit[threadIdx.x] = min + tamFaixa * (threadIdx.x + 1);
+    unsigned int start = blockIdx.x * blockDim.x;
+    unsigned int d = gridDim.x * blockDim.x;
+    unsigned int ig;
+    __syncthreads();
+    while (start < nE) {
+        ig = start + threadIdx.x;
+        if (ig < nE) {
+            unsigned int aux = input[ig];
+            for (int i = 0; i < h; i++) {
+                if (aux < limit[i]) {
+                    parcial[atomicAdd(hlsh+i, 1)] = aux;
+                    break;
+                }
+            }
+        }
+        __syncthreads();
+        if (ig < nE) {
+            output[ig] = parcial[threadIdx.x]; 
+        }
+        start += d;
     }
 }

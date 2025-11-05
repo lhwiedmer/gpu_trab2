@@ -36,7 +36,7 @@ __global__ void blockAndGlobalHisto(unsigned int *hh, unsigned int *hg,
         atomicAdd(hg + threadIdx.x, histo[threadIdx.x]);
 }
 
-
+//Dispara 1 bloco com h threads e aloca um vetor de tamanho h na shared memory
 __global__ void GlobalHistoScan(unsigned int *hg, unsigned int *shg, unsigned int h){
     extern __shared__ unsigned int XY[];
     if (threadIdx.x < h) {
@@ -66,3 +66,33 @@ __global__ void GlobalHistoScan(unsigned int *hg, unsigned int *shg, unsigned in
     }
 }
 
+//Dispara h blocos com lin threads e aloca um vetor de tamanho lin em shared memory
+__global__ void verticalScanHH(unsigned int *hh, unsigned int *psv, unsigned int h, unsigned int lin){
+    extern __shared__ unsigned int XY[];
+    unsigned int ig = blockIdx.x + threadIdx.x * h;
+    unsigned long long int nE = lin * h;
+    if (ig < nE)
+        XY[threadIdx.x] = hh[ig];
+    __syncthreads();
+    unsigned int numThreads = (lin+1) >> 1;
+    for (unsigned int stride = 1;stride <= numThreads; stride = stride << 1) {
+        int index = (threadIdx.x+1)*stride*2 - 1;
+        if(index < lin)
+            XY[index] += XY[index-stride];
+        __syncthreads();
+    }
+    for (unsigned int stride = (numThreads+1) >> 1; stride > 0; stride = stride >> 1) {
+        __syncthreads();
+        int index = (threadIdx.x+1)*stride*2 - 1;
+        if(index+stride < lin)
+            XY[index + stride] += XY[index];
+    }
+    __syncthreads();
+    if (ig < nE) {
+        if (!threadIdx.x) {
+            psv[ig] = 0;
+        } else {
+            psv[ig] = XY[threadIdx.x - 1];
+        }
+    }
+}

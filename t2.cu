@@ -64,8 +64,6 @@ __global__ void blockAndGlobalHisto(unsigned int *hh, unsigned int *hg,
                     break;
                 }
             }
-            /*unsigned int bin_idx = (aux - min) / tamFaixa; //Ao invés de procurar pela faixa, calcular ela diretamente
-            atomicAdd(histo + bin_idx, 1);*/
         }
         __syncthreads();
         start += d;
@@ -321,10 +319,8 @@ int main (int argc, char** argv) {
         } else if (v > nMax) {
             nMax = v;
         }
-        //printf("%d ", v);
         input[i] = v;
     }
-    //printf("\n");
     unsigned int L = (nMax - nMin + h) / h;
 
 

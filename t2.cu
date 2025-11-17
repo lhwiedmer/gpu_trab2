@@ -41,14 +41,10 @@ __global__ void blockAndGlobalHisto(unsigned int *hh, unsigned int *hg,
     extern __shared__ unsigned int shared_mem[];
 
     unsigned int *histo = shared_mem;       // hlsh usa os primeiros 'h' elementos
-    unsigned int *limit = &shared_mem[h];
     //Incializa o vetor histo com 0
     if (threadIdx.x < h)
         histo[threadIdx.x] = 0;
     unsigned int tamFaixa = (max - min + h) / h; //Calcula o teto do numero de possiveis valores sobre o numero de faixas
-    //Calcula o limite superior do intervalo de valores de cada faixa e guarda no vetor limit
-    if (threadIdx.x < h)
-        limit[threadIdx.x] = min + tamFaixa * (threadIdx.x + 1);
     unsigned int start = blockIdx.x * blockDim.x;
     unsigned int d = gridDim.x * blockDim.x;
     unsigned int ig;
@@ -58,12 +54,8 @@ __global__ void blockAndGlobalHisto(unsigned int *hh, unsigned int *hg,
         ig = start + threadIdx.x;
         if (ig < nE) {
             unsigned int aux = input[ig];
-            for (int i = 0; i < h; i++) {
-                if (aux < limit[i]) {
-                    atomicAdd(histo+i, 1);
-                    break;
-                }
-            }
+            unsigned int bin_idx = (aux - min) / tamFaixa; //Ao invés de procurar pela faixa, calcular ela diretamente
+            atomicAdd(histo + bin_idx, 1);
         }
         __syncthreads();
         start += d;
@@ -146,15 +138,12 @@ __global__ void partitionKernel(unsigned int *hh, unsigned int *shg, unsigned in
     extern __shared__ unsigned int shared_mem[];
 
     unsigned int *hlsh = shared_mem;       // hlsh usa os primeiros 'h' elementos
-    unsigned int *limit = &shared_mem[h];
     if (threadIdx.x < h) {
         hlsh[threadIdx.x] = shg[threadIdx.x];
         hlsh[threadIdx.x] += psv[threadIdx.x + blockIdx.x * h];
     }
     unsigned int tamFaixa = (nMax - nMin + h) / h; //Calcula o teto do numero de possiveis valores sobre o numero de faixas
     //Calcula o limite superior do intervalo de valores de cada faixa e guarda no vetor limit
-    if (threadIdx.x < h)
-        limit[threadIdx.x] = nMin + tamFaixa * (threadIdx.x + 1);
     unsigned int start = blockIdx.x * blockDim.x;
     unsigned int d = gridDim.x * blockDim.x;
     unsigned int ig;
@@ -163,12 +152,8 @@ __global__ void partitionKernel(unsigned int *hh, unsigned int *shg, unsigned in
         ig = start + threadIdx.x;
         if (ig < nE) {
             unsigned int aux = input[ig];
-            for (int i = 0; i < h; i++) {
-                if (aux < limit[i]) {
-                    output[atomicAdd(hlsh+i, 1)] = aux;
-                    break;
-                }
-            }
+            unsigned int bin_idx = (aux - min) / tamFaixa; //Ao invés de procurar pela faixa, calcular ela diretamente
+            atomicAdd(hlsh + bin_idx, 1);
         }
         start += d;
     }
@@ -185,10 +170,27 @@ __device__ inline void Comparator(uint &keyA, uint &keyB, uint dir) {
   }
 }
 
+__device__ inline unsigned int nextPot(unsigned int a) {
+    if (a <= 1)   return 1;
+    if (a <= 2)   return 2;
+    if (a <= 4)   return 4;
+    if (a <= 8)   return 8;
+    if (a <= 16)  return 16;
+    if (a <= 32)  return 32;
+    if (a <= 64)  return 64;
+    if (a <= 128) return 128;
+    if (a <= 256) return 256;
+    if (a <= 512) return 512;
+    if (a <= 1024) return 1024;
+    if (a <= 2048) return 2048;
+    if (a <= 4096) return 4096;
+    return 8192; // Se for <= 8192
+}
 
 
 
-__global__ void bitonicSortShared(unsigned int *d_DstKey, unsigned int *d_SrcKey,
+
+__global__ void bitonicSortShared(unsigned int *dKey,
                                   unsigned int arrayLength, 
                                   unsigned int paddedLength,
                                   unsigned int dir) {
@@ -199,12 +201,12 @@ __global__ void bitonicSortShared(unsigned int *d_DstKey, unsigned int *d_SrcKey
     unsigned int idx2 = threadIdx.x + (paddedLength / 2);
 
     if (idx1 < arrayLength) {
-        s_key[idx1] = d_SrcKey[idx1];
+        s_key[idx1] = dKey[idx1];
     } else {
         s_key[idx1] = UINT32_MAX;
     }
     if (idx2 < arrayLength) {
-        s_key[idx2] = d_SrcKey[idx2];
+        s_key[idx2] = dKey[idx2];
     } else {
         s_key[idx2] = UINT32_MAX;
     }
@@ -231,10 +233,10 @@ __global__ void bitonicSortShared(unsigned int *d_DstKey, unsigned int *d_SrcKey
 
     __syncthreads();
     if (idx1 < arrayLength) {
-        d_DstKey[idx1] = s_key[idx1];
+        dKey[idx1] = s_key[idx1];
     }
     if (idx2 < arrayLength) {
-        d_DstKey[idx2] = s_key[idx2];
+        dKey[idx2] = s_key[idx2];
     }
 
 }
@@ -319,8 +321,10 @@ int main (int argc, char** argv) {
         } else if (v > nMax) {
             nMax = v;
         }
+        //printf("%d ", v);
         input[i] = v;
     }
+    //printf("\n");
     unsigned int L = (nMax - nMin + h) / h;
 
 

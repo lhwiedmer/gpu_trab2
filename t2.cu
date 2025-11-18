@@ -190,10 +190,10 @@ __device__ inline unsigned int nextPot(unsigned int a) {
 
 
 
-__global__ void bitonicSortShared(unsigned int *dKey,
-                                  unsigned int arrayLength, 
-                                  unsigned int paddedLength,
-                                  unsigned int dir) {
+__global__ void bitonicSortShared(unsigned int *dKey, //dKey eh um vetor global com tadas as chaves
+                                  unsigned int arrayLength, // colocar o d_offsets, o vetor com cada inicio
+                                  unsigned int paddedLength, // colocar o d_sizes, o vetor com cada tamanho
+                                  unsigned int dir) {        // colocarr o num_segments, o h
   
     extern __shared__ unsigned int s_key[];
 
@@ -240,6 +240,55 @@ __global__ void bitonicSortShared(unsigned int *dKey,
     }
 
 }
+
+__global__ void segmentedBitonicSort(unsigned int *d_Key, 
+                                     unsigned int *d_Offsets, 
+                                     unsigned int *d_Sizes, 
+                                     unsigned int num_segments, 
+                                     unsigned int dir ) { 
+    extern __shared__ unsigned int s_key[]; 
+     
+    // Nota: Adicionei o uso de 'offset' no acesso ao d_Key, 
+    // pois ele estava declarado mas não usado no original.
+    unsigned int offset = d_Offsets[blockIdx.x]; 
+    unsigned int size = d_Sizes[blockIdx.x]; 
+    unsigned int paddedSize = nextPot(size); 
+
+
+    for (unsigned int i = threadIdx.x; i < paddedSize; i += blockDim.x) {
+        if (i < size) {
+            s_key[i] = d_Key[offset + i]; 
+        } else {
+            s_key[i] = UINT32_MAX;
+        }
+    }
+    
+    __syncthreads(); 
+    for (unsigned int s = 2; s <= paddedSize; s <<= 1) { 
+        for (unsigned int stride = s / 2; stride > 0; stride >>= 1) { 
+            __syncthreads(); 
+            for (unsigned int k = threadIdx.x; k < paddedSize / 2; k += blockDim.x) { 
+                unsigned int ddd = dir ^ ((k & (s / 2)) != 0);
+                unsigned int pos = 2 * k - (k & (stride - 1)); 
+                Comparator(s_key[pos + 0], s_key[pos + stride], ddd); 
+            }
+        } 
+    } 
+
+    for (unsigned int stride = paddedSize / 2; stride > 0; stride >>= 1) { 
+        __syncthreads(); 
+        for (unsigned int k = threadIdx.x; k < paddedSize / 2; k += blockDim.x) {
+            unsigned int pos = 2 * k - (k & (stride - 1)); 
+            Comparator(s_key[pos + 0], s_key[pos + stride], dir); 
+        }
+    }
+
+    __syncthreads(); 
+    for (unsigned int i = threadIdx.x; i < size; i += blockDim.x) {
+        d_Key[offset + i] = s_key[i];
+    }
+}
+
 
 unsigned int proximaPotenciaDe2_Limite1024(unsigned int n) {
   if (n <= 1)   return 1;
@@ -455,22 +504,7 @@ int main (int argc, char** argv) {
     for (int r = 0; r < nR; r++) {
         CUDA_CHECK(cudaMemcpy(d_Output, d_Output_backup, nTotal * sizeof(unsigned int), cudaMemcpyDeviceToDevice));
         auto start = std::chrono::high_resolution_clock::now();
-        for (int i = 0; i < h; i++) {
-            unsigned int bin_size = h_Hg[i];
-            if (bin_size == 0) continue;
-            unsigned int bin_start_idx = h_SHg[i];
-            unsigned int *d_Src_i = d_Output  + bin_start_idx;
-
-            if (bin_size > 0 && bin_size <= SHARED_SIZE_LIMIT) {
-
-                pot = proximaPotenciaDe2_Limite1024(bin_size);
-                bitonicSortShared<<<1, pot/2, pot * sizeof(unsigned int)>>>(d_Src_i, d_Src_i, h_Hg[i], pot, 1);
-
-            } else if (bin_size > 0) {
-                // Para faixas maiores que a shared memory, usamos Thrust
-                thrust::sort(thrust::device, d_Src_i, d_Src_i + bin_size);
-            }
-        }
+        segmentedBitonicSort<<<h, 512, 8048>>>(d_Output, d_SHg, d_Hg, h, 1);
         CUDA_CHECK(cudaDeviceSynchronize());
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> elapsed = end - start;
@@ -514,8 +548,8 @@ int main (int argc, char** argv) {
     printf("Tempo ordenacao: %.4fs\n", avg5/1000);
     printf("Tempo total: %.4fs\n", tempoTotal/1000);
     printf("Tempo thrust: %.4fs\n", avg_thrust/1000);
-    printf("Vazão mpp: %.4fGE/s\n", (nTotal/1000000.0)/tempoTotal);
-    printf("Vazão thrust: %.4fGE/s\n", (nTotal/1000000.0)/avg_thrust);
+    printf("Vazão mpp: %.4fGEle/s\n", (nTotal/1000000.0)/tempoTotal);
+    printf("Vazão thrust: %.4fGEle/s\n", (nTotal/1000000.0)/avg_thrust);
     printf("Speedup: %.4f\n", avg_thrust/tempoTotal);
 
 }

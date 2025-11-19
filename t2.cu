@@ -40,11 +40,14 @@ __global__ void blockAndGlobalHisto(unsigned int *hh, unsigned int *hg,
     unsigned int max) {
     extern __shared__ unsigned int shared_mem[];
 
-    unsigned int *histo = shared_mem;       // hlsh usa os primeiros 'h' elementos
+    unsigned int *histo = shared_mem;
+    //unsigned int *limit = &shared_mem[h];       // hlsh usa os primeiros 'h' elementos
     //Incializa o vetor histo com 0
     if (threadIdx.x < h)
         histo[threadIdx.x] = 0;
     unsigned int tamFaixa = (max - min + h) / h; //Calcula o teto do numero de possiveis valores sobre o numero de faixas
+    /*if (threadIdx.x < h)
+        limit[threadIdx.x] = min + tamFaixa * (threadIdx.x + 1);*/
     unsigned int start = blockIdx.x * blockDim.x;
     unsigned int d = gridDim.x * blockDim.x;
     unsigned int ig;
@@ -54,6 +57,12 @@ __global__ void blockAndGlobalHisto(unsigned int *hh, unsigned int *hg,
         ig = start + threadIdx.x;
         if (ig < nE) {
             unsigned int aux = input[ig];
+            /*for (int i = 0; i < h; i++) {
+                if (aux < limit[i]) {
+                    atomicAdd(histo+i, 1);
+                    break;
+                }
+            }*/
             unsigned int bin_idx = (aux - min) / tamFaixa; //Ao invés de procurar pela faixa, calcular ela diretamente
             atomicAdd(histo + bin_idx, 1);
         }
@@ -137,13 +146,16 @@ __global__ void partitionKernel(unsigned int *hh, unsigned int *shg, unsigned in
                                 unsigned long long int nE, unsigned int nMin, unsigned int nMax) {  
     extern __shared__ unsigned int shared_mem[];
 
-    unsigned int *hlsh = shared_mem;       // hlsh usa os primeiros 'h' elementos
+    unsigned int *hlsh = shared_mem;    
+    //unsigned int *limit = &shared_mem[h];   // hlsh usa os primeiros 'h' elementos
     if (threadIdx.x < h) {
         hlsh[threadIdx.x] = shg[threadIdx.x];
         hlsh[threadIdx.x] += psv[threadIdx.x + blockIdx.x * h];
     }
     unsigned int tamFaixa = (nMax - nMin + h) / h; //Calcula o teto do numero de possiveis valores sobre o numero de faixas
     //Calcula o limite superior do intervalo de valores de cada faixa e guarda no vetor limit
+    /*if (threadIdx.x < h)
+        limit[threadIdx.x] = nMin + tamFaixa * (threadIdx.x + 1);*/
     unsigned int start = blockIdx.x * blockDim.x;
     unsigned int d = gridDim.x * blockDim.x;
     unsigned int ig;
@@ -152,8 +164,14 @@ __global__ void partitionKernel(unsigned int *hh, unsigned int *shg, unsigned in
         ig = start + threadIdx.x;
         if (ig < nE) {
             unsigned int aux = input[ig];
-            unsigned int bin_idx = (aux - min) / tamFaixa; //Ao invés de procurar pela faixa, calcular ela diretamente
-            atomicAdd(hlsh + bin_idx, 1);
+            /*for (int i = 0; i < h; i++) {
+                if (aux < limit[i]) {
+                    output[atomicAdd(hlsh+i, 1)] = aux;
+                    break;
+                }
+            }*/
+            unsigned int bin_idx = (aux - nMin) / tamFaixa; //Ao invés de procurar pela faixa, calcular ela diretamente
+            output[atomicAdd(hlsh + bin_idx, 1)] = aux;
         }
         start += d;
     }
@@ -170,6 +188,7 @@ __device__ inline void Comparator(uint &keyA, uint &keyB, uint dir) {
   }
 }
 
+/*
 __device__ inline unsigned int nextPot(unsigned int a) {
     if (a <= 1)   return 1;
     if (a <= 2)   return 2;
@@ -186,8 +205,15 @@ __device__ inline unsigned int nextPot(unsigned int a) {
     if (a <= 4096) return 4096;
     return 8192; // Se for <= 8192
 }
+*/
 
 
+__device__ inline unsigned int nextPot(unsigned int a) {
+    if (a <= 1) return 1;
+    // __clz conta quantos zeros existem antes do primeiro bit 1.
+    // Subtraímos 1 de 'a' para lidar corretamente com casos onde 'a' já é potência de 2.
+    return 1 << (32 - __clz(a - 1));
+}
 
 
 __global__ void bitonicSortShared(unsigned int *dKey, //dKey eh um vetor global com tadas as chaves
@@ -504,7 +530,8 @@ int main (int argc, char** argv) {
     for (int r = 0; r < nR; r++) {
         CUDA_CHECK(cudaMemcpy(d_Output, d_Output_backup, nTotal * sizeof(unsigned int), cudaMemcpyDeviceToDevice));
         auto start = std::chrono::high_resolution_clock::now();
-        segmentedBitonicSort<<<h, 512, 8048>>>(d_Output, d_SHg, d_Hg, h, 1);
+        unsigned int size = sizeof(unsigned int) * 8192;
+        segmentedBitonicSort<<<h, 512, size>>>(d_Output, d_SHg, d_Hg, h, 1);
         CUDA_CHECK(cudaDeviceSynchronize());
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> elapsed = end - start;

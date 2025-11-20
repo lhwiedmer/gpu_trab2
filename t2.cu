@@ -21,7 +21,11 @@
 #include <thrust/functional.h>
 #include <thrust/execution_policy.h>
 
-#define SHARED_SIZE_LIMIT 1024
+#define SHARED_SIZE_LIMIT 8192
+
+#ifndef THREADS_PER_BLOCK
+#define THREADS_PER_BLOCK 1024
+#endif 
 
 // --- Macro de verificação de erro CUDA ---
 static void HandleError( cudaError_t err, const char *file, int line ) {
@@ -41,13 +45,11 @@ __global__ void blockAndGlobalHisto(unsigned int *hh, unsigned int *hg,
     extern __shared__ unsigned int shared_mem[];
 
     unsigned int *histo = shared_mem;
-    //unsigned int *limit = &shared_mem[h];       // hlsh usa os primeiros 'h' elementos
     //Incializa o vetor histo com 0
-    if (threadIdx.x < h)
-        histo[threadIdx.x] = 0;
+    for (int i = threadIdx.x; i < h; i += blockDim.x) {
+        histo[i] = 0;
+    }
     unsigned int tamFaixa = (max - min + h) / h; //Calcula o teto do numero de possiveis valores sobre o numero de faixas
-    /*if (threadIdx.x < h)
-        limit[threadIdx.x] = min + tamFaixa * (threadIdx.x + 1);*/
     unsigned int start = blockIdx.x * blockDim.x;
     unsigned int d = gridDim.x * blockDim.x;
     unsigned int ig;
@@ -57,12 +59,6 @@ __global__ void blockAndGlobalHisto(unsigned int *hh, unsigned int *hg,
         ig = start + threadIdx.x;
         if (ig < nE) {
             unsigned int aux = input[ig];
-            /*for (int i = 0; i < h; i++) {
-                if (aux < limit[i]) {
-                    atomicAdd(histo+i, 1);
-                    break;
-                }
-            }*/
             unsigned int bin_idx = (aux - min) / tamFaixa; //Ao invés de procurar pela faixa, calcular ela diretamente
             atomicAdd(histo + bin_idx, 1);
         }
@@ -71,11 +67,13 @@ __global__ void blockAndGlobalHisto(unsigned int *hh, unsigned int *hg,
     }
     __syncthreads();
     //Copia o histograma local do bloco para a linha corespondente de hh
-    if (threadIdx.x < h)
-        hh[threadIdx.x + blockIdx.x * h] = histo[threadIdx.x];
+    for (int i = threadIdx.x; i < h; i += blockDim.x) {
+        hh[i + blockIdx.x * h] = histo[i];
+    }
     //Calcula o histograma global hg
-    if (threadIdx.x < h)
-        atomicAdd(hg + threadIdx.x, histo[threadIdx.x]);
+    for (int i = threadIdx.x; i < h; i += blockDim.x) {
+        atomicAdd(hg + i, histo[i]);
+    }
 }
 
 //Dispara 1 bloco com h threads e aloca um vetor de tamanho h na shared memory
@@ -147,15 +145,10 @@ __global__ void partitionKernel(unsigned int *hh, unsigned int *shg, unsigned in
     extern __shared__ unsigned int shared_mem[];
 
     unsigned int *hlsh = shared_mem;    
-    //unsigned int *limit = &shared_mem[h];   // hlsh usa os primeiros 'h' elementos
-    if (threadIdx.x < h) {
-        hlsh[threadIdx.x] = shg[threadIdx.x];
-        hlsh[threadIdx.x] += psv[threadIdx.x + blockIdx.x * h];
+    for (int i = threadIdx.x; i < h; i += blockDim.x) {
+        hlsh[i] = shg[i] + psv[i + blockIdx.x * h];
     }
     unsigned int tamFaixa = (nMax - nMin + h) / h; //Calcula o teto do numero de possiveis valores sobre o numero de faixas
-    //Calcula o limite superior do intervalo de valores de cada faixa e guarda no vetor limit
-    /*if (threadIdx.x < h)
-        limit[threadIdx.x] = nMin + tamFaixa * (threadIdx.x + 1);*/
     unsigned int start = blockIdx.x * blockDim.x;
     unsigned int d = gridDim.x * blockDim.x;
     unsigned int ig;
@@ -164,12 +157,6 @@ __global__ void partitionKernel(unsigned int *hh, unsigned int *shg, unsigned in
         ig = start + threadIdx.x;
         if (ig < nE) {
             unsigned int aux = input[ig];
-            /*for (int i = 0; i < h; i++) {
-                if (aux < limit[i]) {
-                    output[atomicAdd(hlsh+i, 1)] = aux;
-                    break;
-                }
-            }*/
             unsigned int bin_idx = (aux - nMin) / tamFaixa; //Ao invés de procurar pela faixa, calcular ela diretamente
             output[atomicAdd(hlsh + bin_idx, 1)] = aux;
         }
@@ -188,83 +175,10 @@ __device__ inline void Comparator(uint &keyA, uint &keyB, uint dir) {
   }
 }
 
-/*
-__device__ inline unsigned int nextPot(unsigned int a) {
-    if (a <= 1)   return 1;
-    if (a <= 2)   return 2;
-    if (a <= 4)   return 4;
-    if (a <= 8)   return 8;
-    if (a <= 16)  return 16;
-    if (a <= 32)  return 32;
-    if (a <= 64)  return 64;
-    if (a <= 128) return 128;
-    if (a <= 256) return 256;
-    if (a <= 512) return 512;
-    if (a <= 1024) return 1024;
-    if (a <= 2048) return 2048;
-    if (a <= 4096) return 4096;
-    return 8192; // Se for <= 8192
-}
-*/
-
 
 __device__ inline unsigned int nextPot(unsigned int a) {
     if (a <= 1) return 1;
-    // __clz conta quantos zeros existem antes do primeiro bit 1.
-    // Subtraímos 1 de 'a' para lidar corretamente com casos onde 'a' já é potência de 2.
     return 1 << (32 - __clz(a - 1));
-}
-
-
-__global__ void bitonicSortShared(unsigned int *dKey, //dKey eh um vetor global com tadas as chaves
-                                  unsigned int arrayLength, // colocar o d_offsets, o vetor com cada inicio
-                                  unsigned int paddedLength, // colocar o d_sizes, o vetor com cada tamanho
-                                  unsigned int dir) {        // colocarr o num_segments, o h
-  
-    extern __shared__ unsigned int s_key[];
-
-    unsigned int idx1 = threadIdx.x;
-    unsigned int idx2 = threadIdx.x + (paddedLength / 2);
-
-    if (idx1 < arrayLength) {
-        s_key[idx1] = dKey[idx1];
-    } else {
-        s_key[idx1] = UINT32_MAX;
-    }
-    if (idx2 < arrayLength) {
-        s_key[idx2] = dKey[idx2];
-    } else {
-        s_key[idx2] = UINT32_MAX;
-    }
-
-    __syncthreads();
-
-    for (unsigned int size = 2; size < paddedLength; size <<= 1) {
-        // Bitonic merge
-        unsigned int ddd = dir ^ ((threadIdx.x & (size / 2)) != 0);
-
-        for (unsigned int stride = size / 2; stride > 0; stride >>= 1) {
-        __syncthreads();
-        unsigned int pos = 2 * threadIdx.x - (threadIdx.x & (stride - 1));
-        Comparator(s_key[pos + 0], s_key[pos + stride], ddd);
-        }
-    }
-
-    // ddd == dir for the last bitonic merge step
-    for (unsigned int stride = paddedLength / 2; stride > 0; stride >>= 1) {
-        __syncthreads();
-        unsigned int pos = 2 * threadIdx.x - (threadIdx.x & (stride - 1));
-        Comparator(s_key[pos + 0], s_key[pos + stride], dir);
-    }
-
-    __syncthreads();
-    if (idx1 < arrayLength) {
-        dKey[idx1] = s_key[idx1];
-    }
-    if (idx2 < arrayLength) {
-        dKey[idx2] = s_key[idx2];
-    }
-
 }
 
 __global__ void segmentedBitonicSort(unsigned int *d_Key, 
@@ -316,18 +230,9 @@ __global__ void segmentedBitonicSort(unsigned int *d_Key,
 }
 
 
-unsigned int proximaPotenciaDe2_Limite1024(unsigned int n) {
-  if (n <= 1)   return 1;
-  if (n <= 2)   return 2;
-  if (n <= 4)   return 4;
-  if (n <= 8)   return 8;
-  if (n <= 16)  return 16;
-  if (n <= 32)  return 32;
-  if (n <= 64)  return 64;
-  if (n <= 128) return 128;
-  if (n <= 256) return 256;
-  if (n <= 512) return 512;
-  return 1024; // Se for <= 1024
+unsigned int proximaPotenciaDe2_Limite1024(unsigned int a) {
+    if (a <= 1) return 1;
+    return 1 << (32 - __builtin_clz(a - 1));
 }
 
 bool verifySort(unsigned int* h_mppSorted, unsigned int* h_thrustSorted, long long n) {
@@ -358,13 +263,31 @@ int main (int argc, char** argv) {
         exit(1);
     }
 
+    auto medir_kernel = [&](auto&& launch) {
+        cudaEvent_t start, stop;
+        CUDA_CHECK(cudaEventCreate(&start));
+        CUDA_CHECK(cudaEventCreate(&stop));
+
+        CUDA_CHECK(cudaEventRecord(start));
+        launch();  // aqui você chama o kernel
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+
+        CUDA_CHECK(cudaEventDestroy(start));
+        CUDA_CHECK(cudaEventDestroy(stop));
+        return ms;
+    };
+
     long long nTotal = atoll(argv[1]);
     long long h = atoll(argv[2]);
     int nR = atoi(argv[3]);
 
     // Por conta do tamanho dos histogramas
-    if (h > SHARED_SIZE_LIMIT) {
-        printf("h não pode ser maior que %d\n", SHARED_SIZE_LIMIT);
+    if (h > THREADS_PER_BLOCK) {
+        printf("h não pode ser maior que %d\n", THREADS_PER_BLOCK);
         exit(1);
     }
 
@@ -414,7 +337,6 @@ int main (int argc, char** argv) {
 
     // Parâmetros dos kernels
     // Kernel 1 & 4
-    int nt = 1024; // Threads por bloco
     int nb = 128;  // Número de bloco
 
 
@@ -449,15 +371,10 @@ int main (int argc, char** argv) {
     for (int i = 0; i < nR; i++) {
         CUDA_CHECK(cudaMemset(d_HH, 0, nb * h * sizeof(unsigned int)));
         CUDA_CHECK(cudaMemset(d_Hg, 0, h * sizeof(unsigned int)));
-
-        auto start = std::chrono::high_resolution_clock::now();
         
-        blockAndGlobalHisto<<<nb, nt, sharedMemK1>>>(d_HH, d_Hg, h, d_Input, nTotal, nMin, nMax);
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        auto end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double, std::milli> elapsed = end - start;
-        totalTime1 += elapsed.count();
+        totalTime1 += medir_kernel([&] {
+            blockAndGlobalHisto<<<nb, THREADS_PER_BLOCK, sharedMemK1>>>(d_HH, d_Hg, h, d_Input, nTotal, nMin, nMax);
+        });
     }
 
     double avg1 = totalTime1/nR;
@@ -468,15 +385,10 @@ int main (int argc, char** argv) {
     size_t sharedMemK2 = pot * sizeof(unsigned int);
 
     for (int i = 0; i < nR; i++) {
-
-        auto start = std::chrono::high_resolution_clock::now();
         
-        GlobalHistoScan<<<1, pot, sharedMemK2>>>(d_Hg, d_SHg, h, pot);
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        auto end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double, std::milli> elapsed = end - start;
-        totalTime2 += elapsed.count();
+        totalTime1 += medir_kernel([&] {
+            GlobalHistoScan<<<1, pot, sharedMemK2>>>(d_Hg, d_SHg, h, pot);
+        });
     }
 
     double avg2 = totalTime2/nR;
@@ -486,15 +398,11 @@ int main (int argc, char** argv) {
 
     size_t sharedMemK3 = nb * sizeof(unsigned int);
     for (int i = 0; i < nR; i++) {
+        
+        totalTime3 += medir_kernel([&] {
+            verticalScanHH<<<h, nb, sharedMemK3>>>(d_HH, d_PSv, h, nb);
+        });
 
-        auto start = std::chrono::high_resolution_clock::now();
-        
-        verticalScanHH<<<h, nb, sharedMemK3>>>(d_HH, d_PSv, h, nb);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        
-        auto end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double, std::milli> elapsed = end - start;
-        totalTime3 += elapsed.count();
     }
 
     double avg3 = totalTime3/nR;
@@ -504,14 +412,9 @@ int main (int argc, char** argv) {
     size_t sharedMemK4 = h * 2 * sizeof(unsigned int);
     for (int i = 0; i < nR; i++) {
 
-        auto start = std::chrono::high_resolution_clock::now();
-        
-        partitionKernel<<<nb,nt,sharedMemK4>>>( d_HH, d_SHg, d_PSv, h, d_Input, d_Output, nTotal, nMin, nMax ); 
-        CUDA_CHECK(cudaDeviceSynchronize());
-        
-        auto end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double, std::milli> elapsed = end - start;
-        totalTime4 += elapsed.count();
+        totalTime4 += medir_kernel([&] {
+            partitionKernel<<<nb,THREADS_PER_BLOCK,sharedMemK4>>>( d_HH, d_SHg, d_PSv, h, d_Input, d_Output, nTotal, nMin, nMax );
+        });
     }
 
     double avg4 = totalTime4/nR;
@@ -529,13 +432,10 @@ int main (int argc, char** argv) {
     double totalTime5 = 0.0;
     for (int r = 0; r < nR; r++) {
         CUDA_CHECK(cudaMemcpy(d_Output, d_Output_backup, nTotal * sizeof(unsigned int), cudaMemcpyDeviceToDevice));
-        auto start = std::chrono::high_resolution_clock::now();
-        unsigned int size = sizeof(unsigned int) * 8192;
-        segmentedBitonicSort<<<h, 512, size>>>(d_Output, d_SHg, d_Hg, h, 1);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        auto end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double, std::milli> elapsed = end - start;
-        totalTime5 += elapsed.count();
+        unsigned int size = sizeof(unsigned int) * SHARED_SIZE_LIMIT;
+        totalTime5 += medir_kernel([&] {
+            segmentedBitonicSort<<<h, THREADS_PER_BLOCK, size>>>(d_Output, d_SHg, d_Hg, h, 1);
+        });
     }
     double avg5 = totalTime5/nR;
 
@@ -546,14 +446,9 @@ int main (int argc, char** argv) {
     for(int r = 0; r < nR; r++) {
         CUDA_CHECK(cudaMemcpy(d_Thrust, input.data(), nTotal * sizeof(unsigned int), cudaMemcpyHostToDevice));
 
-        auto start_thrust = std::chrono::high_resolution_clock::now();
-        
-        thrust::sort(thrust::device, d_Thrust, d_Thrust + nTotal);
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        auto end_thrust = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double, std::milli> elapsed_thrust_run = end_thrust - start_thrust;
-        totalTime_thrust_accum += elapsed_thrust_run.count();
+        totalTime_thrust_accum += medir_kernel([&] {
+            thrust::sort(thrust::device, d_Thrust, d_Thrust + nTotal);
+        });
     }
     double avg_thrust = totalTime_thrust_accum / nR;
 
@@ -568,15 +463,15 @@ int main (int argc, char** argv) {
     }
     
 
-    printf("Tempo blockAndGlobalHisto: %.4fs\n", avg1/1000);
-    printf("Tempo GlobalHistoScan: %.4fs\n", avg2/1000);
-    printf("Tempo verticalScanHH: %.4fs\n", avg3/1000);
-    printf("Tempo partitionKernel: %.4fs\n", avg4/1000);
-    printf("Tempo ordenacao: %.4fs\n", avg5/1000);
-    printf("Tempo total: %.4fs\n", tempoTotal/1000);
-    printf("Tempo thrust: %.4fs\n", avg_thrust/1000);
-    printf("Vazão mpp: %.4fGEle/s\n", (nTotal/1000000.0)/tempoTotal);
-    printf("Vazão thrust: %.4fGEle/s\n", (nTotal/1000000.0)/avg_thrust);
-    printf("Speedup: %.4f\n", avg_thrust/tempoTotal);
+    printf("Tempo blockAndGlobalHisto: %.6fs\n", avg1/1000);
+    printf("Tempo GlobalHistoScan: %.6fs\n", avg2/1000);
+    printf("Tempo verticalScanHH: %.6fs\n", avg3/1000);
+    printf("Tempo partitionKernel: %.6fs\n", avg4/1000);
+    printf("Tempo ordenacao: %.6fs\n", avg5/1000);
+    printf("Tempo total: %.6fs\n", tempoTotal/1000);
+    printf("Tempo thrust: %.6fs\n", avg_thrust/1000);
+    printf("Vazão mpp: %.6fGEle/s\n", (nTotal/1000000.0)/tempoTotal);
+    printf("Vazão thrust: %.6fGEle/s\n", (nTotal/1000000.0)/avg_thrust);
+    printf("Speedup: %.6f\n", avg_thrust/tempoTotal);
 
 }
